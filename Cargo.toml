@@ -15,3 +15,4 @@ glob-match = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+filetime = "0.2"

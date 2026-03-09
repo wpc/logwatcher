@@ -343,4 +343,24 @@ mod tests {
         t.file_modified(PathBuf::from("/home/user/logs/sub/output.txt"), vec![], 0);
         assert_eq!(t.panels[0].as_ref().unwrap().display_name, "sub/output.txt");
     }
+
+    #[test]
+    fn truncate_cmd_short_unchanged() {
+        assert_eq!(super::truncate_cmd("tail -f x.txt", 60), "tail -f x.txt");
+    }
+
+    #[test]
+    fn truncate_cmd_exact_limit() {
+        let s = "a".repeat(60);
+        assert_eq!(super::truncate_cmd(&s, 60), s);
+    }
+
+    #[test]
+    fn truncate_cmd_over_limit() {
+        let s = "a".repeat(70);
+        let result = super::truncate_cmd(&s, 60);
+        assert_eq!(result.len(), 60);
+        assert!(result.ends_with("..."));
+        assert_eq!(&result[..57], &"a".repeat(57));
+    }
 }
