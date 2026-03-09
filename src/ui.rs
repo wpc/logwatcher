@@ -146,7 +146,7 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help_text = vec![
-        Line::from(Span::styled("Logwather - Help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Logwatcher - Help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled("Navigation", Style::default().fg(Color::Yellow))),
         Line::from("  Tab / Shift+Tab    Cycle panels"),

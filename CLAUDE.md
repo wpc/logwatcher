@@ -17,7 +17,7 @@ cargo run -- /path/to/dir -n 6 -g "*.log"  # 6 panels, glob filter
 
 ## Architecture
 
-Logwather is a Rust TUI app that tails the N most recently changed files in a directory, displaying each in its own terminal panel. Designed for monitoring ephemeral task outputs (e.g., Claude Code subagent logs).
+Logwatcher is a Rust TUI app that tails the N most recently changed files in a directory, displaying each in its own terminal panel. Designed for monitoring ephemeral task outputs (e.g., Claude Code subagent logs).
 
 ### Event-driven async architecture
 

@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "logwather", about = "Multi-file tail watcher with split terminal panels")]
+#[command(name = "logwatcher", about = "Multi-file tail watcher with split terminal panels")]
 pub struct Args {
     /// Directory to watch for file changes
     #[arg(default_value = ".")]
