@@ -62,6 +62,7 @@ async fn run(args: &Args, terminal: &mut tui::Tui) -> Result<()> {
                 }
                 AppEvent::Tick => {
                     app.tracker.gc_stale(app.stale_timeout);
+                    app.clamp_selected_panel();
                 }
             }
 
@@ -101,9 +102,8 @@ fn initial_scan(app: &mut App, args: &Args) -> Result<()> {
         match tail_reader::read_tail(&path, app.tail_lines) {
             Ok((lines, size)) => {
                 let idx = app.tracker.file_modified(path.clone(), lines, size);
-                if let Some(ref mut tracked) = app.tracker.panels[idx] {
-                    tracked.process_cmd = file_tracker::lookup_process(&path);
-                }
+                app.ensure_scroll_offset(idx);
+                app.tracker.panels[idx].process_cmd = file_tracker::lookup_process(&path);
             }
             Err(_) => {}
         }
@@ -146,23 +146,18 @@ fn walkdir_recursive(
 
 fn handle_file_changed(app: &mut App, path: &std::path::Path) {
     if let Some(panel_idx) = app.tracker.panel_index(path) {
-        let last_size = app.tracker.panels[panel_idx]
-            .as_ref()
-            .map(|t| t.last_size)
-            .unwrap_or(0);
+        let last_size = app.tracker.panels[panel_idx].last_size;
         match tail_reader::read_new_content(path, last_size, app.tail_lines) {
             Ok((new_lines, new_size)) => {
                 if !new_lines.is_empty() {
                     app.tracker.append_lines(panel_idx, new_lines, new_size);
-                } else if let Some(ref mut tracked) = app.tracker.panels[panel_idx] {
-                    tracked.last_size = new_size;
-                    tracked.last_modified = std::time::Instant::now();
+                } else {
+                    app.tracker.panels[panel_idx].last_size = new_size;
+                    app.tracker.panels[panel_idx].last_modified = std::time::Instant::now();
                 }
                 // Lookup process if not yet known
-                if app.tracker.panels[panel_idx].as_ref().map_or(true, |t| t.process_cmd.is_none()) {
-                    if let Some(ref mut tracked) = app.tracker.panels[panel_idx] {
-                        tracked.process_cmd = file_tracker::lookup_process(path);
-                    }
+                if app.tracker.panels[panel_idx].process_cmd.is_none() {
+                    app.tracker.panels[panel_idx].process_cmd = file_tracker::lookup_process(path);
                 }
             }
             Err(_) => {
@@ -174,9 +169,8 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
         match tail_reader::read_tail(path, app.tail_lines) {
             Ok((lines, size)) => {
                 let idx = app.tracker.file_modified(path.to_path_buf(), lines, size);
-                if let Some(ref mut tracked) = app.tracker.panels[idx] {
-                    tracked.process_cmd = file_tracker::lookup_process(path);
-                }
+                app.ensure_scroll_offset(idx);
+                app.tracker.panels[idx].process_cmd = file_tracker::lookup_process(path);
             }
             Err(_) => {}
         }
@@ -184,57 +178,69 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
 }
 
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let active = app.tracker.active_count();
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.should_quit = true;
         }
         KeyCode::Tab => {
-            app.selected_panel = (app.selected_panel + 1) % app.max_panels;
+            if active > 0 {
+                app.selected_panel = (app.selected_panel + 1) % active;
+            }
         }
         KeyCode::BackTab => {
-            app.selected_panel = if app.selected_panel == 0 {
-                app.max_panels - 1
-            } else {
-                app.selected_panel - 1
-            };
+            if active > 0 {
+                app.selected_panel = if app.selected_panel == 0 {
+                    active - 1
+                } else {
+                    app.selected_panel - 1
+                };
+            }
         }
         KeyCode::Char(c @ '1'..='9') => {
             let idx = (c as usize) - ('1' as usize);
-            if idx < app.max_panels {
+            if idx < active {
                 app.selected_panel = idx;
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
+            app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_add(1);
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
+            app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_sub(1);
             }
         }
         KeyCode::PageUp => {
+            app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_add(20);
             }
         }
         KeyCode::PageDown => {
+            app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_sub(20);
             }
         }
         KeyCode::End | KeyCode::Char('G') => {
+            app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = 0;
             }
         }
         KeyCode::Home | KeyCode::Char('g') => {
+            app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
-                let total = app.tracker.panels[app.selected_panel]
-                    .as_ref()
-                    .map(|t| t.lines.len())
-                    .unwrap_or(0);
+                let total = if app.selected_panel < active {
+                    app.tracker.panels[app.selected_panel].lines.len()
+                } else {
+                    0
+                };
                 *offset = total;
             }
         }
@@ -313,9 +319,8 @@ mod tests {
         initial_scan(&mut app, &args).unwrap();
 
         // Only the recent file should be loaded
-        let populated: Vec<_> = app.tracker.panels.iter().filter(|p| p.is_some()).collect();
-        assert_eq!(populated.len(), 1);
-        assert!(populated[0].as_ref().unwrap().display_name.contains("new.txt"));
+        assert_eq!(app.tracker.active_count(), 1);
+        assert!(app.tracker.panels[0].display_name.contains("new.txt"));
     }
 
     #[test]
@@ -325,7 +330,7 @@ mod tests {
         let mut app = App::new(&args);
         initial_scan(&mut app, &args).unwrap();
 
-        assert!(app.tracker.panels.iter().all(|p| p.is_none()));
+        assert_eq!(app.tracker.active_count(), 0);
     }
 
     #[test]
@@ -342,8 +347,14 @@ mod tests {
     #[test]
     fn handle_key_tab_cycles_panels() {
         let tmp = TempDir::new().unwrap();
+        // Create 4 files so we have 4 active panels
+        for name in &["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(tmp.path().join(name), "content").unwrap();
+        }
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+        assert_eq!(app.tracker.active_count(), 4);
         assert_eq!(app.selected_panel, 0);
 
         handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Tab));
@@ -363,22 +374,39 @@ mod tests {
     #[test]
     fn handle_key_number_selects_panel() {
         let tmp = TempDir::new().unwrap();
+        for name in &["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(tmp.path().join(name), "content").unwrap();
+        }
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
 
         handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('3')));
         assert_eq!(app.selected_panel, 2);
 
-        // Out of range ignored
+        // Out of range ignored (only 4 panels active)
         handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('9')));
         assert_eq!(app.selected_panel, 2); // unchanged
     }
 
     #[test]
-    fn handle_key_scroll() {
+    fn handle_key_tab_noop_when_empty() {
         let tmp = TempDir::new().unwrap();
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
+        assert_eq!(app.selected_panel, 0);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.selected_panel, 0); // no panels, stays at 0
+    }
+
+    #[test]
+    fn handle_key_scroll() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "content").unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
 
         assert_eq!(app.scroll_offsets[0], 0);
         handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Up));
@@ -421,7 +449,7 @@ mod tests {
 
         assert!(app.tracker.panel_index(&file_path).is_some());
         let idx = app.tracker.panel_index(&file_path).unwrap();
-        let tracked = app.tracker.panels[idx].as_ref().unwrap();
+        let tracked = &app.tracker.panels[idx];
         assert_eq!(tracked.lines, vec!["hello", "world"]);
     }
 
@@ -436,7 +464,7 @@ mod tests {
 
         handle_file_changed(&mut app, &file_path);
         let idx = app.tracker.panel_index(&file_path).unwrap();
-        let size_after_first = app.tracker.panels[idx].as_ref().unwrap().last_size;
+        let size_after_first = app.tracker.panels[idx].last_size;
 
         // Append more content
         let mut f = std::fs::OpenOptions::new().append(true).open(&file_path).unwrap();
@@ -444,7 +472,7 @@ mod tests {
         f.flush().unwrap();
 
         handle_file_changed(&mut app, &file_path);
-        let tracked = app.tracker.panels[idx].as_ref().unwrap();
+        let tracked = &app.tracker.panels[idx];
         assert_eq!(tracked.lines, vec!["line1", "line2"]);
         assert!(tracked.last_size > size_after_first);
     }

@@ -18,22 +18,24 @@ const MAX_LINES_PER_FILE: usize = 500;
 
 /// Manages which files occupy which panel slots
 pub struct FileTracker {
-    pub panels: Vec<Option<TrackedFile>>,
+    pub panels: Vec<TrackedFile>,
     path_to_panel: HashMap<PathBuf, usize>,
     watch_root: PathBuf,
+    max_panels: usize,
 }
 
 impl FileTracker {
     pub fn new(max_panels: usize, watch_root: PathBuf) -> Self {
-        let mut panels = Vec::with_capacity(max_panels);
-        for _ in 0..max_panels {
-            panels.push(None);
-        }
         Self {
-            panels,
+            panels: Vec::new(),
             path_to_panel: HashMap::new(),
             watch_root,
+            max_panels,
         }
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.panels.len()
     }
 
     /// Look up the panel index for a given path.
@@ -47,40 +49,17 @@ impl FileTracker {
         let mtime = file_mtime(&path);
         // If already tracked, update in place
         if let Some(&idx) = self.path_to_panel.get(&path) {
-            if let Some(ref mut tracked) = self.panels[idx] {
-                tracked.lines = lines;
-                tracked.last_modified = Instant::now();
-                tracked.last_size = file_size;
-                tracked.is_deleted = false;
-                tracked.file_mtime = mtime;
-            }
+            let tracked = &mut self.panels[idx];
+            tracked.lines = lines;
+            tracked.last_modified = Instant::now();
+            tracked.last_size = file_size;
+            tracked.is_deleted = false;
+            tracked.file_mtime = mtime;
             return idx;
         }
 
         let display_name = self.make_display_name(&path);
-
-        // Find an empty slot
-        if let Some(idx) = self.panels.iter().position(|p| p.is_none()) {
-            self.panels[idx] = Some(TrackedFile {
-                path: path.clone(),
-                display_name,
-                lines,
-                last_modified: Instant::now(),
-                last_size: file_size,
-                is_deleted: false,
-                process_cmd: None,
-                file_mtime: mtime,
-            });
-            self.path_to_panel.insert(path, idx);
-            return idx;
-        }
-
-        // All slots full — evict
-        let evict_idx = self.eviction_candidate();
-        if let Some(ref old) = self.panels[evict_idx] {
-            self.path_to_panel.remove(&old.path.clone());
-        }
-        self.panels[evict_idx] = Some(TrackedFile {
+        let new_tracked = TrackedFile {
             path: path.clone(),
             display_name,
             lines,
@@ -89,49 +68,65 @@ impl FileTracker {
             is_deleted: false,
             process_cmd: None,
             file_mtime: mtime,
-        });
+        };
+
+        // Room to grow — push a new panel
+        if self.panels.len() < self.max_panels {
+            let idx = self.panels.len();
+            self.panels.push(new_tracked);
+            self.path_to_panel.insert(path, idx);
+            return idx;
+        }
+
+        // All slots full — evict
+        let evict_idx = self.eviction_candidate();
+        self.path_to_panel.remove(&self.panels[evict_idx].path.clone());
+        self.panels[evict_idx] = new_tracked;
         self.path_to_panel.insert(path, evict_idx);
         evict_idx
     }
 
     /// Append new lines to an already-tracked panel.
     pub fn append_lines(&mut self, panel_idx: usize, new_lines: Vec<String>, new_size: u64) {
-        if let Some(ref mut tracked) = self.panels[panel_idx] {
-            tracked.lines.extend(new_lines);
-            // Cap the lines buffer
-            if tracked.lines.len() > MAX_LINES_PER_FILE {
-                let drain_count = tracked.lines.len() - MAX_LINES_PER_FILE;
-                tracked.lines.drain(..drain_count);
-            }
-            tracked.last_modified = Instant::now();
-            tracked.last_size = new_size;
-            tracked.file_mtime = file_mtime(&tracked.path);
+        let tracked = &mut self.panels[panel_idx];
+        tracked.lines.extend(new_lines);
+        // Cap the lines buffer
+        if tracked.lines.len() > MAX_LINES_PER_FILE {
+            let drain_count = tracked.lines.len() - MAX_LINES_PER_FILE;
+            tracked.lines.drain(..drain_count);
         }
+        tracked.last_modified = Instant::now();
+        tracked.last_size = new_size;
+        tracked.file_mtime = file_mtime(&tracked.path);
     }
 
     /// Called when a file is deleted.
     pub fn file_deleted(&mut self, path: &Path) {
         if let Some(&idx) = self.path_to_panel.get(path) {
-            if let Some(ref mut tracked) = self.panels[idx] {
-                tracked.is_deleted = true;
-            }
+            self.panels[idx].is_deleted = true;
         }
     }
 
     /// Remove panels for deleted files that have been stale longer than the timeout.
+    /// Compacts the panels vec and updates path_to_panel indices.
     pub fn gc_stale(&mut self, timeout: std::time::Duration) {
         let now = Instant::now();
-        for i in 0..self.panels.len() {
-            let should_clear = if let Some(ref tracked) = self.panels[i] {
-                tracked.is_deleted && now.duration_since(tracked.last_modified) > timeout
-            } else {
-                false
-            };
-            if should_clear {
-                if let Some(ref tracked) = self.panels[i] {
-                    self.path_to_panel.remove(&tracked.path);
+        let mut i = 0;
+        while i < self.panels.len() {
+            let should_remove = self.panels[i].is_deleted
+                && now.duration_since(self.panels[i].last_modified) > timeout;
+            if should_remove {
+                self.path_to_panel.remove(&self.panels[i].path);
+                self.panels.remove(i);
+                // Shift down all indices >= i
+                for val in self.path_to_panel.values_mut() {
+                    if *val >= i {
+                        *val = val.saturating_sub(1);
+                    }
                 }
-                self.panels[i] = None;
+                // Don't increment i — next element shifted into this position
+            } else {
+                i += 1;
             }
         }
     }
@@ -142,20 +137,15 @@ impl FileTracker {
         let mut best_time = Instant::now();
         let mut found_deleted = false;
 
-        for (i, panel) in self.panels.iter().enumerate() {
-            if let Some(ref tracked) = panel {
-                // Prefer evicting deleted files
-                if tracked.is_deleted && !found_deleted {
-                    found_deleted = true;
-                    best_idx = i;
-                    best_time = tracked.last_modified;
-                } else if tracked.is_deleted == found_deleted && tracked.last_modified < best_time {
-                    best_idx = i;
-                    best_time = tracked.last_modified;
-                }
-            } else {
-                // Empty slot — shouldn't happen since we check first, but just in case
-                return i;
+        for (i, tracked) in self.panels.iter().enumerate() {
+            // Prefer evicting deleted files
+            if tracked.is_deleted && !found_deleted {
+                found_deleted = true;
+                best_idx = i;
+                best_time = tracked.last_modified;
+            } else if tracked.is_deleted == found_deleted && tracked.last_modified < best_time {
+                best_idx = i;
+                best_time = tracked.last_modified;
             }
         }
 
@@ -247,11 +237,12 @@ mod tests {
         let mut t = tracker(3);
         let idx = t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["hello".into()], 6);
         assert_eq!(idx, 0);
-        assert!(t.panels[0].is_some());
-        assert_eq!(t.panels[0].as_ref().unwrap().display_name, "a.txt");
+        assert_eq!(t.active_count(), 1);
+        assert_eq!(t.panels[0].display_name, "a.txt");
 
         let idx2 = t.file_modified(PathBuf::from("/tmp/b.txt"), vec![], 0);
         assert_eq!(idx2, 1);
+        assert_eq!(t.active_count(), 2);
     }
 
     #[test]
@@ -260,9 +251,9 @@ mod tests {
         t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["v1".into()], 3);
         let idx = t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["v2".into()], 3);
         assert_eq!(idx, 0);
-        assert_eq!(t.panels[0].as_ref().unwrap().lines, vec!["v2"]);
-        // Should not have used a second slot
-        assert!(t.panels[1].is_none());
+        assert_eq!(t.panels[0].lines, vec!["v2"]);
+        // Should not have grown
+        assert_eq!(t.active_count(), 1);
     }
 
     #[test]
@@ -277,7 +268,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let idx = t.file_modified(PathBuf::from("/tmp/c.txt"), vec!["c".into()], 2);
         assert_eq!(idx, 0); // a.txt was in slot 0
-        assert_eq!(t.panels[0].as_ref().unwrap().display_name, "c.txt");
+        assert_eq!(t.panels[0].display_name, "c.txt");
         assert!(t.panel_index(&PathBuf::from("/tmp/a.txt")).is_none());
     }
 
@@ -294,7 +285,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let idx = t.file_modified(PathBuf::from("/tmp/c.txt"), vec!["c".into()], 2);
         assert_eq!(idx, 1); // b.txt was in slot 1
-        assert_eq!(t.panels[1].as_ref().unwrap().display_name, "c.txt");
+        assert_eq!(t.panels[1].display_name, "c.txt");
     }
 
     #[test]
@@ -314,7 +305,7 @@ mod tests {
         let big: Vec<String> = (0..600).map(|i| format!("line {}", i)).collect();
         t.append_lines(0, big, 9999);
 
-        let tracked = t.panels[0].as_ref().unwrap();
+        let tracked = &t.panels[0];
         assert_eq!(tracked.lines.len(), 500); // MAX_LINES_PER_FILE
         assert_eq!(tracked.lines.last().unwrap(), "line 599");
     }
@@ -323,10 +314,10 @@ mod tests {
     fn file_deleted_marks_flag() {
         let mut t = tracker(1);
         t.file_modified(PathBuf::from("/tmp/a.txt"), vec![], 0);
-        assert!(!t.panels[0].as_ref().unwrap().is_deleted);
+        assert!(!t.panels[0].is_deleted);
 
         t.file_deleted(&PathBuf::from("/tmp/a.txt"));
-        assert!(t.panels[0].as_ref().unwrap().is_deleted);
+        assert!(t.panels[0].is_deleted);
     }
 
     #[test]
@@ -337,7 +328,7 @@ mod tests {
 
         // With zero timeout, should clear immediately
         t.gc_stale(std::time::Duration::ZERO);
-        assert!(t.panels[0].is_none());
+        assert_eq!(t.active_count(), 0);
         assert!(t.panel_index(&PathBuf::from("/tmp/a.txt")).is_none());
     }
 
@@ -347,14 +338,14 @@ mod tests {
         t.file_modified(PathBuf::from("/tmp/a.txt"), vec![], 0);
 
         t.gc_stale(std::time::Duration::ZERO);
-        assert!(t.panels[0].is_some()); // not deleted, should remain
+        assert_eq!(t.active_count(), 1); // not deleted, should remain
     }
 
     #[test]
     fn display_name_strips_watch_root() {
         let mut t = FileTracker::new(1, PathBuf::from("/home/user/logs"));
         t.file_modified(PathBuf::from("/home/user/logs/sub/output.txt"), vec![], 0);
-        assert_eq!(t.panels[0].as_ref().unwrap().display_name, "sub/output.txt");
+        assert_eq!(t.panels[0].display_name, "sub/output.txt");
     }
 
     #[test]
@@ -389,7 +380,7 @@ mod tests {
         let mut t = FileTracker::new(1, tmp.path().to_path_buf());
         t.file_modified(path, vec!["hello".into()], 5);
 
-        let tracked = t.panels[0].as_ref().unwrap();
+        let tracked = &t.panels[0];
         // file_mtime should be very close to the actual mtime
         let diff = tracked.file_mtime.duration_since(expected_mtime).unwrap_or_default();
         assert!(diff.as_millis() < 100);
@@ -405,7 +396,7 @@ mod tests {
 
         let mut t = FileTracker::new(1, tmp.path().to_path_buf());
         t.file_modified(path.clone(), vec!["line1".into()], 6);
-        let mtime_before = t.panels[0].as_ref().unwrap().file_mtime;
+        let mtime_before = t.panels[0].file_mtime;
 
         // Wait a bit and append
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -414,8 +405,46 @@ mod tests {
         f.flush().unwrap();
 
         t.append_lines(0, vec!["line2".into()], 12);
-        let mtime_after = t.panels[0].as_ref().unwrap().file_mtime;
+        let mtime_after = t.panels[0].file_mtime;
 
         assert!(mtime_after > mtime_before);
+    }
+
+    #[test]
+    fn gc_stale_compacts_indices() {
+        let mut t = tracker(4);
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["a".into()], 2);
+        t.file_modified(PathBuf::from("/tmp/b.txt"), vec!["b".into()], 2);
+        t.file_modified(PathBuf::from("/tmp/c.txt"), vec!["c".into()], 2);
+
+        // Delete b.txt (index 1) and gc
+        t.file_deleted(&PathBuf::from("/tmp/b.txt"));
+        t.gc_stale(std::time::Duration::ZERO);
+
+        assert_eq!(t.active_count(), 2);
+        assert_eq!(t.panels[0].display_name, "a.txt");
+        assert_eq!(t.panels[1].display_name, "c.txt");
+        // Indices should be updated
+        assert_eq!(t.panel_index(&PathBuf::from("/tmp/a.txt")), Some(0));
+        assert_eq!(t.panel_index(&PathBuf::from("/tmp/c.txt")), Some(1));
+    }
+
+    #[test]
+    fn dynamic_growth() {
+        let mut t = tracker(3);
+        assert_eq!(t.active_count(), 0);
+
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec![], 0);
+        assert_eq!(t.active_count(), 1);
+
+        t.file_modified(PathBuf::from("/tmp/b.txt"), vec![], 0);
+        assert_eq!(t.active_count(), 2);
+
+        t.file_modified(PathBuf::from("/tmp/c.txt"), vec![], 0);
+        assert_eq!(t.active_count(), 3);
+
+        // At max — should evict, not grow
+        t.file_modified(PathBuf::from("/tmp/d.txt"), vec![], 0);
+        assert_eq!(t.active_count(), 3);
     }
 }

@@ -10,8 +10,16 @@ pub fn render(frame: &mut Frame, app: &App) {
         return;
     }
 
-    // Count active panels (non-None) for layout, but always allocate max_panels grid
-    let n = app.max_panels;
+    let n = app.tracker.active_count();
+    if n == 0 {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" logwatcher (no files) ")
+            .border_style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(block, area);
+        return;
+    }
+
     let panel_areas = compute_grid(area, n);
 
     for (i, panel_area) in panel_areas.iter().enumerate() {
@@ -73,75 +81,63 @@ fn compute_grid(area: Rect, n: usize) -> Vec<Rect> {
 }
 
 fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
-    let panel = &app.tracker.panels[panel_idx];
+    let tracked = &app.tracker.panels[panel_idx];
+    let is_selected = panel_idx == app.selected_panel;
 
-    match panel {
-        None => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" [{}] (waiting...) ", panel_idx + 1))
-                .border_style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(block, area);
-        }
-        Some(tracked) => {
-            let is_selected = panel_idx == app.selected_panel;
+    let title_style = if tracked.is_deleted {
+        Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
+    } else if is_selected {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
+    };
 
-            let title_style = if tracked.is_deleted {
-                Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
-            } else if is_selected {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Green)
-            };
+    let deleted_marker = if tracked.is_deleted { " [deleted]" } else { "" };
+    let process_info = tracked.process_cmd.as_ref()
+        .map(|cmd| format!(" ({})", cmd))
+        .unwrap_or_default();
+    let title = format!(" [{}] {}{}{} ", panel_idx + 1, tracked.display_name, process_info, deleted_marker);
 
-            let deleted_marker = if tracked.is_deleted { " [deleted]" } else { "" };
-            let process_info = tracked.process_cmd.as_ref()
-                .map(|cmd| format!(" ({})", cmd))
-                .unwrap_or_default();
-            let title = format!(" [{}] {}{}{} ", panel_idx + 1, tracked.display_name, process_info, deleted_marker);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(title_style)
+        .title_bottom(Line::from(format!(" {} ", format_elapsed_since(tracked.file_mtime)))
+            .right_aligned()
+            .style(Style::default().fg(Color::DarkGray)))
+        .border_style(if is_selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        });
 
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .title_style(title_style)
-                .title_bottom(Line::from(format!(" {} ", format_elapsed_since(tracked.file_mtime)))
-                    .right_aligned()
-                    .style(Style::default().fg(Color::DarkGray)))
-                .border_style(if is_selected {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                });
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            let visible_height = inner.height as usize;
-            if visible_height == 0 {
-                return;
-            }
-
-            let total_lines = tracked.lines.len();
-            let scroll = app.scroll_offsets.get(panel_idx).copied().unwrap_or(0);
-
-            let end = if total_lines > scroll {
-                total_lines - scroll
-            } else {
-                0
-            };
-            let start = if end > visible_height {
-                end - visible_height
-            } else {
-                0
-            };
-
-            let visible_text = tracked.lines[start..end].join("\n");
-            let paragraph = Paragraph::new(visible_text)
-                .wrap(Wrap { trim: false });
-
-            frame.render_widget(paragraph, inner);
-        }
+    let visible_height = inner.height as usize;
+    if visible_height == 0 {
+        return;
     }
+
+    let total_lines = tracked.lines.len();
+    let scroll = app.scroll_offsets.get(panel_idx).copied().unwrap_or(0);
+
+    let end = if total_lines > scroll {
+        total_lines - scroll
+    } else {
+        0
+    };
+    let start = if end > visible_height {
+        end - visible_height
+    } else {
+        0
+    };
+
+    let visible_text = tracked.lines[start..end].join("\n");
+    let paragraph = Paragraph::new(visible_text)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, inner);
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
