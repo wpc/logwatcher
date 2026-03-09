@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 /// State for a single tracked file
 pub struct TrackedFile {
@@ -11,6 +11,7 @@ pub struct TrackedFile {
     pub last_size: u64,
     pub is_deleted: bool,
     pub process_cmd: Option<String>,
+    pub file_mtime: SystemTime,
 }
 
 const MAX_LINES_PER_FILE: usize = 500;
@@ -43,6 +44,7 @@ impl FileTracker {
     /// Called when a file is created or modified with initial content.
     /// Returns the panel index that was assigned.
     pub fn file_modified(&mut self, path: PathBuf, lines: Vec<String>, file_size: u64) -> usize {
+        let mtime = file_mtime(&path);
         // If already tracked, update in place
         if let Some(&idx) = self.path_to_panel.get(&path) {
             if let Some(ref mut tracked) = self.panels[idx] {
@@ -50,6 +52,7 @@ impl FileTracker {
                 tracked.last_modified = Instant::now();
                 tracked.last_size = file_size;
                 tracked.is_deleted = false;
+                tracked.file_mtime = mtime;
             }
             return idx;
         }
@@ -66,6 +69,7 @@ impl FileTracker {
                 last_size: file_size,
                 is_deleted: false,
                 process_cmd: None,
+                file_mtime: mtime,
             });
             self.path_to_panel.insert(path, idx);
             return idx;
@@ -84,6 +88,7 @@ impl FileTracker {
             last_size: file_size,
             is_deleted: false,
             process_cmd: None,
+            file_mtime: mtime,
         });
         self.path_to_panel.insert(path, evict_idx);
         evict_idx
@@ -100,6 +105,7 @@ impl FileTracker {
             }
             tracked.last_modified = Instant::now();
             tracked.last_size = new_size;
+            tracked.file_mtime = file_mtime(&tracked.path);
         }
     }
 
@@ -162,6 +168,13 @@ impl FileTracker {
             .to_string_lossy()
             .to_string()
     }
+}
+
+/// Read the file's mtime from the filesystem. Falls back to now if unavailable.
+fn file_mtime(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|_| SystemTime::now())
 }
 
 /// Look up the full command line of the process that has a file open.
@@ -362,5 +375,47 @@ mod tests {
         assert_eq!(result.len(), 60);
         assert!(result.ends_with("..."));
         assert_eq!(&result[..57], &"a".repeat(57));
+    }
+
+    #[test]
+    fn file_mtime_is_set_from_filesystem() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let expected_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let mut t = FileTracker::new(1, tmp.path().to_path_buf());
+        t.file_modified(path, vec!["hello".into()], 5);
+
+        let tracked = t.panels[0].as_ref().unwrap();
+        // file_mtime should be very close to the actual mtime
+        let diff = tracked.file_mtime.duration_since(expected_mtime).unwrap_or_default();
+        assert!(diff.as_millis() < 100);
+    }
+
+    #[test]
+    fn file_mtime_updates_on_append() {
+        use tempfile::TempDir;
+        use std::io::Write;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.txt");
+        std::fs::write(&path, "line1\n").unwrap();
+
+        let mut t = FileTracker::new(1, tmp.path().to_path_buf());
+        t.file_modified(path.clone(), vec!["line1".into()], 6);
+        let mtime_before = t.panels[0].as_ref().unwrap().file_mtime;
+
+        // Wait a bit and append
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"line2\n").unwrap();
+        f.flush().unwrap();
+
+        t.append_lines(0, vec!["line2".into()], 12);
+        let mtime_after = t.panels[0].as_ref().unwrap().file_mtime;
+
+        assert!(mtime_after > mtime_before);
     }
 }

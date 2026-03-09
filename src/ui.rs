@@ -104,6 +104,9 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
                 .borders(Borders::ALL)
                 .title(title)
                 .title_style(title_style)
+                .title_bottom(Line::from(format!(" {} ", format_elapsed_since(tracked.file_mtime)))
+                    .right_aligned()
+                    .style(Style::default().fg(Color::DarkGray)))
                 .border_style(if is_selected {
                     Style::default().fg(Color::Cyan)
                 } else {
@@ -186,4 +189,57 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         Constraint::Percentage(percent_x),
         Constraint::Percentage((100 - percent_x) / 2),
     ]).split(popup_layout[1])[1]
+}
+
+fn format_elapsed_since(t: std::time::SystemTime) -> String {
+    let elapsed = t.elapsed().unwrap_or_default();
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn format_elapsed_seconds() {
+        let t = SystemTime::now() - Duration::from_secs(5);
+        let result = format_elapsed_since(t);
+        assert!(result.ends_with("s ago"));
+    }
+
+    #[test]
+    fn format_elapsed_minutes() {
+        let t = SystemTime::now() - Duration::from_secs(120);
+        assert_eq!(format_elapsed_since(t), "2m ago");
+    }
+
+    #[test]
+    fn format_elapsed_hours() {
+        let t = SystemTime::now() - Duration::from_secs(7200);
+        assert_eq!(format_elapsed_since(t), "2h ago");
+    }
+
+    #[test]
+    fn format_elapsed_just_now() {
+        let t = SystemTime::now();
+        assert_eq!(format_elapsed_since(t), "0s ago");
+    }
+
+    #[test]
+    fn compute_grid_returns_correct_count() {
+        let area = Rect::new(0, 0, 100, 50);
+        assert_eq!(compute_grid(area, 0).len(), 0);
+        assert_eq!(compute_grid(area, 1).len(), 1);
+        assert_eq!(compute_grid(area, 2).len(), 2);
+        assert_eq!(compute_grid(area, 4).len(), 4);
+        assert_eq!(compute_grid(area, 6).len(), 6);
+    }
 }
