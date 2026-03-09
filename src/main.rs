@@ -476,4 +476,189 @@ mod tests {
         assert_eq!(tracked.lines, vec!["line1", "line2"]);
         assert!(tracked.last_size > size_after_first);
     }
+
+    #[test]
+    fn handle_key_esc_quits() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        assert!(!app.should_quit);
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Esc));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn handle_key_backtab_cycles_reverse() {
+        let tmp = TempDir::new().unwrap();
+        for name in &["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tmp.path().join(name), "content").unwrap();
+        }
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+        assert_eq!(app.selected_panel, 0);
+
+        // BackTab from 0 wraps to last
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.selected_panel, 2);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.selected_panel, 1);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.selected_panel, 0);
+    }
+
+    #[test]
+    fn handle_key_page_scroll() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "content").unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::PageUp));
+        assert_eq!(app.scroll_offsets[0], 20);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::PageDown));
+        assert_eq!(app.scroll_offsets[0], 0);
+    }
+
+    #[test]
+    fn handle_key_end_resets_scroll() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "content").unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        // Scroll up then End should reset to 0 (follow mode)
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Up));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.scroll_offsets[0], 2);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::End));
+        assert_eq!(app.scroll_offsets[0], 0);
+    }
+
+    #[test]
+    fn handle_key_home_scrolls_to_top() {
+        let tmp = TempDir::new().unwrap();
+        // Create a file with multiple lines
+        let content: String = (0..20).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(tmp.path().join("a.txt"), &content).unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Home));
+        // Should set scroll to total lines count
+        assert_eq!(app.scroll_offsets[0], app.tracker.panels[0].lines.len());
+    }
+
+    #[test]
+    fn handle_key_vim_bindings() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "content").unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        // 'k' scrolls up
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.scroll_offsets[0], 1);
+
+        // 'j' scrolls down
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.scroll_offsets[0], 0);
+    }
+
+    #[test]
+    fn handle_file_changed_deleted_file() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "hello\n").unwrap();
+
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        handle_file_changed(&mut app, &file_path);
+        assert_eq!(app.tracker.active_count(), 1);
+
+        // Delete the file, then trigger a change event
+        std::fs::remove_file(&file_path).unwrap();
+        handle_file_changed(&mut app, &file_path);
+
+        // Should be marked deleted
+        assert!(app.tracker.panels[0].is_deleted);
+    }
+
+    #[test]
+    fn initial_scan_respects_max_panels() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..10 {
+            std::fs::write(tmp.path().join(format!("file{}.txt", i)), "content").unwrap();
+        }
+        let mut args = make_args(tmp.path().to_path_buf());
+        args.max_panels = 3;
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        assert_eq!(app.tracker.active_count(), 3);
+    }
+
+    #[test]
+    fn clamp_selected_panel_after_gc() {
+        let tmp = TempDir::new().unwrap();
+        for name in &["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tmp.path().join(name), "content").unwrap();
+        }
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        // Select last panel
+        app.selected_panel = 2;
+
+        // Delete all files and gc
+        for name in &["a.txt", "b.txt", "c.txt"] {
+            app.tracker.file_deleted(&tmp.path().join(name));
+        }
+        app.tracker.gc_stale(std::time::Duration::ZERO);
+        app.clamp_selected_panel();
+
+        assert_eq!(app.tracker.active_count(), 0);
+        assert_eq!(app.selected_panel, 0);
+    }
+
+    #[test]
+    fn ensure_scroll_offset_grows() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        assert!(app.scroll_offsets.is_empty());
+        app.ensure_scroll_offset(2);
+        assert_eq!(app.scroll_offsets.len(), 3);
+        assert_eq!(app.scroll_offsets, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn handle_file_changed_grows_panels_dynamically() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        assert_eq!(app.tracker.active_count(), 0);
+
+        // Add files one by one via handle_file_changed
+        for i in 0..3 {
+            let p = tmp.path().join(format!("f{}.txt", i));
+            std::fs::write(&p, format!("content {}", i)).unwrap();
+            handle_file_changed(&mut app, &p);
+        }
+
+        assert_eq!(app.tracker.active_count(), 3);
+        assert_eq!(app.scroll_offsets.len(), 3);
+    }
 }

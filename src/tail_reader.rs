@@ -135,5 +135,30 @@ mod tests {
         assert_eq!(lines, vec!["short"]);
         assert!(new_size < old_size);
     }
+
+    #[test]
+    fn read_tail_single_line_no_newline() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "no trailing newline").unwrap();
+        f.flush().unwrap();
+
+        let (lines, size) = read_tail(f.path(), 10).unwrap();
+        assert_eq!(lines, vec!["no trailing newline"]);
+        assert!(size > 0);
+    }
+
+    #[test]
+    fn read_new_content_multiple_lines() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "line1\n").unwrap();
+        f.flush().unwrap();
+        let initial_size = std::fs::metadata(f.path()).unwrap().len();
+
+        write!(f, "line2\nline3\nline4\n").unwrap();
+        f.flush().unwrap();
+
+        let (lines, _) = read_new_content(f.path(), initial_size, 50).unwrap();
+        assert_eq!(lines, vec!["line2", "line3", "line4"]);
+    }
 }
 

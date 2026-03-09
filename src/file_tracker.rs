@@ -447,4 +447,65 @@ mod tests {
         t.file_modified(PathBuf::from("/tmp/d.txt"), vec![], 0);
         assert_eq!(t.active_count(), 3);
     }
+
+    #[test]
+    fn file_deleted_unknown_path_is_noop() {
+        let mut t = tracker(2);
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec![], 0);
+        t.file_deleted(&PathBuf::from("/tmp/nonexistent.txt"));
+        assert_eq!(t.active_count(), 1);
+        assert!(!t.panels[0].is_deleted);
+    }
+
+    #[test]
+    fn re_add_deleted_file_clears_deleted_flag() {
+        let mut t = tracker(2);
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["v1".into()], 3);
+        t.file_deleted(&PathBuf::from("/tmp/a.txt"));
+        assert!(t.panels[0].is_deleted);
+
+        // Re-modify same file
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["v2".into()], 3);
+        assert!(!t.panels[0].is_deleted);
+        assert_eq!(t.panels[0].lines, vec!["v2"]);
+    }
+
+    #[test]
+    fn gc_stale_respects_timeout() {
+        let mut t = tracker(2);
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec![], 0);
+        t.file_deleted(&PathBuf::from("/tmp/a.txt"));
+
+        // With a long timeout, should NOT be removed
+        t.gc_stale(std::time::Duration::from_secs(3600));
+        assert_eq!(t.active_count(), 1);
+    }
+
+    #[test]
+    fn gc_stale_multiple_deletions() {
+        let mut t = tracker(4);
+        t.file_modified(PathBuf::from("/tmp/a.txt"), vec!["a".into()], 2);
+        t.file_modified(PathBuf::from("/tmp/b.txt"), vec!["b".into()], 2);
+        t.file_modified(PathBuf::from("/tmp/c.txt"), vec!["c".into()], 2);
+        t.file_modified(PathBuf::from("/tmp/d.txt"), vec!["d".into()], 2);
+
+        // Delete a and c (indices 0 and 2)
+        t.file_deleted(&PathBuf::from("/tmp/a.txt"));
+        t.file_deleted(&PathBuf::from("/tmp/c.txt"));
+        t.gc_stale(std::time::Duration::ZERO);
+
+        assert_eq!(t.active_count(), 2);
+        assert_eq!(t.panels[0].display_name, "b.txt");
+        assert_eq!(t.panels[1].display_name, "d.txt");
+        assert_eq!(t.panel_index(&PathBuf::from("/tmp/b.txt")), Some(0));
+        assert_eq!(t.panel_index(&PathBuf::from("/tmp/d.txt")), Some(1));
+    }
+
+    #[test]
+    fn display_name_outside_watch_root() {
+        let mut t = FileTracker::new(1, PathBuf::from("/home/user/logs"));
+        t.file_modified(PathBuf::from("/other/path/file.txt"), vec![], 0);
+        // Outside watch root — should use full path
+        assert_eq!(t.panels[0].display_name, "/other/path/file.txt");
+    }
 }

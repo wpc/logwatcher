@@ -31,7 +31,7 @@ All three are spawned as tokio tasks in `event.rs::EventHandler::new()`. The mai
 
 ### Panel management (`file_tracker.rs`)
 
-`FileTracker` maintains a fixed-size `Vec<Option<TrackedFile>>` where index = panel position on screen. A `HashMap<PathBuf, usize>` provides O(1) lookup from file path to panel index. When all panels are full and a new file arrives, the least-recently-modified panel is evicted (deleted files evicted first). `gc_stale()` is called on each tick to clear deleted files past the stale timeout. Each `TrackedFile` also stores an optional `process_cmd` detected via `lsof -F c` (see `lookup_process()`).
+`FileTracker` maintains a dynamic `Vec<TrackedFile>` that grows as files arrive, up to `max_panels`. A `HashMap<PathBuf, usize>` provides O(1) lookup from file path to panel index. When all panels are full and a new file arrives, the least-recently-modified panel is evicted (deleted files evicted first). `gc_stale()` removes deleted files past the stale timeout and compacts the vec, re-indexing remaining panels. Each `TrackedFile` also stores an optional `process_cmd` detected via `lsof -F pc` + `/proc/<pid>/cmdline` (see `lookup_process()`).
 
 ### Rendering (`ui.rs`)
 
@@ -49,5 +49,5 @@ All three are spawned as tokio tasks in `event.rs::EventHandler::new()`. The mai
 - `ui.rs` — grid layout computation, panel rendering, help overlay
 - `tail_reader.rs` — file tailing with truncation detection
 - `cli.rs` — clap `Args` struct
-- `app.rs` — `App` state (wraps `FileTracker` + UI state)
+- `app.rs` — `App` state (wraps `FileTracker` + UI state, dynamic scroll offsets, panel clamping)
 - `tui.rs` — terminal init/restore/panic hook
