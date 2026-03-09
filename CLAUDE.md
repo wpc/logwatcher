@@ -2,17 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Build & Run
+## Build, Test & Run
 
 ```bash
 source "$HOME/.cargo/env"  # if cargo not in PATH
 cargo build                # dev build
 cargo build --release      # release build
+cargo test                 # run all unit tests
+cargo test tail_reader     # run tests in one module
+cargo test read_tail       # run a single test by name
 cargo run -- /path/to/dir  # run watching a directory
 cargo run -- /path/to/dir -n 6 -g "*.log"  # 6 panels, glob filter
 ```
-
-No tests or linter configured yet.
 
 ## Architecture
 
@@ -30,7 +31,7 @@ All three are spawned as tokio tasks in `event.rs::EventHandler::new()`. The mai
 
 ### Panel management (`file_tracker.rs`)
 
-`FileTracker` maintains a fixed-size `Vec<Option<TrackedFile>>` where index = panel position on screen. A `HashMap<PathBuf, usize>` provides O(1) lookup from file path to panel index. When all panels are full and a new file arrives, the least-recently-modified panel is evicted (deleted files evicted first). `gc_stale()` is called on each tick to clear deleted files past the stale timeout.
+`FileTracker` maintains a fixed-size `Vec<Option<TrackedFile>>` where index = panel position on screen. A `HashMap<PathBuf, usize>` provides O(1) lookup from file path to panel index. When all panels are full and a new file arrives, the least-recently-modified panel is evicted (deleted files evicted first). `gc_stale()` is called on each tick to clear deleted files past the stale timeout. Each `TrackedFile` also stores an optional `process_cmd` detected via `lsof -F c` (see `lookup_process()`).
 
 ### Rendering (`ui.rs`)
 

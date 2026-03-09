@@ -90,7 +90,10 @@ fn initial_scan(app: &mut App, args: &Args) -> Result<()> {
     for path in entries.into_iter().take(app.max_panels) {
         match tail_reader::read_tail(&path, app.tail_lines) {
             Ok((lines, size)) => {
-                app.tracker.file_modified(path, lines, size);
+                let idx = app.tracker.file_modified(path.clone(), lines, size);
+                if let Some(ref mut tracked) = app.tracker.panels[idx] {
+                    tracked.process_cmd = file_tracker::lookup_process(&path);
+                }
             }
             Err(_) => {}
         }
@@ -145,6 +148,12 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
                     tracked.last_size = new_size;
                     tracked.last_modified = std::time::Instant::now();
                 }
+                // Lookup process if not yet known
+                if app.tracker.panels[panel_idx].as_ref().map_or(true, |t| t.process_cmd.is_none()) {
+                    if let Some(ref mut tracked) = app.tracker.panels[panel_idx] {
+                        tracked.process_cmd = file_tracker::lookup_process(path);
+                    }
+                }
             }
             Err(_) => {
                 app.tracker.file_deleted(&path.to_path_buf());
@@ -154,7 +163,10 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
         // New file
         match tail_reader::read_tail(path, app.tail_lines) {
             Ok((lines, size)) => {
-                app.tracker.file_modified(path.to_path_buf(), lines, size);
+                let idx = app.tracker.file_modified(path.to_path_buf(), lines, size);
+                if let Some(ref mut tracked) = app.tracker.panels[idx] {
+                    tracked.process_cmd = file_tracker::lookup_process(path);
+                }
             }
             Err(_) => {}
         }

@@ -95,7 +95,10 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
             };
 
             let deleted_marker = if tracked.is_deleted { " [deleted]" } else { "" };
-            let title = format!(" [{}] {}{} ", panel_idx + 1, tracked.display_name, deleted_marker);
+            let process_info = tracked.process_cmd.as_ref()
+                .map(|cmd| format!(" ({})", cmd))
+                .unwrap_or_default();
+            let title = format!(" [{}] {}{}{} ", panel_idx + 1, tracked.display_name, process_info, deleted_marker);
 
             let block = Block::default()
                 .borders(Borders::ALL)
