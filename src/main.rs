@@ -51,7 +51,7 @@ async fn run(args: &Args, terminal: &mut tui::Tui) -> Result<()> {
                 AppEvent::Key(key) => {
                     handle_key(&mut app, key);
                 }
-                AppEvent::Resize(_, _) => {
+                AppEvent::Resize => {
                     // ratatui handles resize automatically on next draw
                 }
                 AppEvent::FileChanged(path) => {

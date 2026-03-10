@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum AppEvent {
     Key(KeyEvent),
-    Resize(u16, u16),
+    Resize,
     Tick,
     FileChanged(PathBuf),
     FileDeleted(PathBuf),
@@ -43,8 +43,8 @@ impl EventHandler {
                                     let _ = tx_ct.send(AppEvent::Key(key));
                                 }
                             }
-                            Some(Ok(crossterm::event::Event::Resize(w, h))) => {
-                                let _ = tx_ct.send(AppEvent::Resize(w, h));
+                            Some(Ok(crossterm::event::Event::Resize(_, _))) => {
+                                let _ = tx_ct.send(AppEvent::Resize);
                             }
                             Some(Err(_)) => {}
                             None => break,
