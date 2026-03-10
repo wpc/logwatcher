@@ -17,29 +17,33 @@ use event::{AppEvent, EventHandler};
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let dir = args.dir.canonicalize().unwrap_or_else(|_| args.dir.clone());
-    if !dir.is_dir() {
-        anyhow::bail!("'{}' is not a directory", dir.display());
-    }
+    let dir = validate_dir(&args.dir)?;
 
     tui::install_panic_hook();
     let mut terminal = tui::init()?;
 
-    let result = run(&args, &mut terminal).await;
+    let result = run(&args, &dir, &mut terminal).await;
 
     tui::restore()?;
     result
 }
 
-async fn run(args: &Args, terminal: &mut tui::Tui) -> Result<()> {
+fn validate_dir(dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if !canonical.is_dir() {
+        anyhow::bail!("'{}' is not a directory", canonical.display());
+    }
+    Ok(canonical)
+}
+
+async fn run(args: &Args, dir: &std::path::Path, terminal: &mut tui::Tui) -> Result<()> {
     let mut app = App::new(args);
 
     initial_scan(&mut app, args)?;
 
-    let dir = args.dir.canonicalize().unwrap_or_else(|_| args.dir.clone());
     let mut events = EventHandler::new(
         std::time::Duration::from_millis(args.tick_rate_ms),
-        dir,
+        dir.to_path_buf(),
         args.glob.clone(),
     )?;
 
@@ -47,25 +51,7 @@ async fn run(args: &Args, terminal: &mut tui::Tui) -> Result<()> {
 
     loop {
         if let Some(event) = events.next().await {
-            match event {
-                AppEvent::Key(key) => {
-                    handle_key(&mut app, key);
-                }
-                AppEvent::Resize => {
-                    // ratatui handles resize automatically on next draw
-                }
-                AppEvent::FileChanged(path) => {
-                    handle_file_changed(&mut app, &path);
-                }
-                AppEvent::FileDeleted(path) => {
-                    app.tracker.file_deleted(&path);
-                }
-                AppEvent::Tick => {
-                    app.tracker.gc_stale(app.stale_timeout);
-                    app.clamp_selected_panel();
-                }
-            }
-
+            dispatch_event(&mut app, event);
             terminal.draw(|f| ui::render(f, &app))?;
         }
 
@@ -177,6 +163,27 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
     }
 }
 
+fn dispatch_event(app: &mut App, event: AppEvent) {
+    match event {
+        AppEvent::Key(key) => {
+            handle_key(app, key);
+        }
+        AppEvent::Resize => {
+            // ratatui handles resize automatically on next draw
+        }
+        AppEvent::FileChanged(path) => {
+            handle_file_changed(app, &path);
+        }
+        AppEvent::FileDeleted(path) => {
+            app.tracker.file_deleted(&path);
+        }
+        AppEvent::Tick => {
+            app.tracker.gc_stale(app.stale_timeout);
+            app.clamp_selected_panel();
+        }
+    }
+}
+
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
     let active = app.tracker.active_count();
     match key.code {
@@ -242,12 +249,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
-                let total = if app.selected_panel < active {
-                    app.tracker.panels[app.selected_panel].lines.len()
-                } else {
-                    0
-                };
-                *offset = total;
+                *offset = app.tracker.panels[app.selected_panel].lines.len();
             }
         }
         KeyCode::Char('?') => {
@@ -272,6 +274,28 @@ mod tests {
             tick_rate_ms: 250,
             glob: None,
         }
+    }
+
+    #[test]
+    fn validate_dir_accepts_valid_directory() {
+        let tmp = TempDir::new().unwrap();
+        let result = validate_dir(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_dir_rejects_file() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("not_a_dir.txt");
+        std::fs::write(&file, "data").unwrap();
+        let result = validate_dir(&file);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_dir_rejects_nonexistent() {
+        let result = validate_dir(std::path::Path::new("/nonexistent/path/xyz"));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -666,5 +690,183 @@ mod tests {
 
         assert_eq!(app.tracker.active_count(), 3);
         assert_eq!(app.scroll_offsets.len(), 3);
+    }
+
+    #[test]
+    fn handle_file_changed_no_new_content() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "hello\n").unwrap();
+
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        handle_file_changed(&mut app, &file_path);
+
+        let idx = app.tracker.panel_index(&file_path).unwrap();
+        let size_before = app.tracker.panels[idx].last_size;
+
+        // Trigger change without modifying the file — no new content
+        handle_file_changed(&mut app, &file_path);
+        assert_eq!(app.tracker.panels[idx].last_size, size_before);
+    }
+
+    #[test]
+    fn clamp_selected_panel_noop_when_valid() {
+        let tmp = TempDir::new().unwrap();
+        for name in &["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tmp.path().join(name), "content").unwrap();
+        }
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        app.selected_panel = 1;
+        app.clamp_selected_panel();
+        // Already valid, should be unchanged
+        assert_eq!(app.selected_panel, 1);
+    }
+
+    #[test]
+    fn clamp_selected_panel_reduces_to_last() {
+        let tmp = TempDir::new().unwrap();
+        for name in &["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tmp.path().join(name), "content").unwrap();
+        }
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        // selected_panel beyond active count, but panels still exist
+        app.selected_panel = 5;
+        app.clamp_selected_panel();
+        assert_eq!(app.selected_panel, 2); // clamped to last (count - 1)
+    }
+
+    #[test]
+    fn handle_key_scroll_noop_when_empty() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        // All scroll keys should be no-ops when no panels
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Up));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Down));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::PageUp));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::PageDown));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Home));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::End));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('j')));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('k')));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('g')));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('G')));
+        assert!(app.scroll_offsets.is_empty());
+    }
+
+    #[test]
+    fn handle_key_g_uppercase_resets_scroll() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "content").unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        initial_scan(&mut app, &args).unwrap();
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Up));
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.scroll_offsets[0], 2);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('G')));
+        assert_eq!(app.scroll_offsets[0], 0);
+    }
+
+    #[test]
+    fn handle_key_unknown_key_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        handle_key(&mut app, crossterm::event::KeyEvent::from(KeyCode::Char('x')));
+        assert!(!app.should_quit);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn walkdir_skips_directories() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "data").unwrap();
+
+        let results = walkdir(tmp.path(), &None).unwrap();
+        // Only the file, not the directory
+        assert_eq!(results.len(), 1);
+        assert!(results[0].to_string_lossy().contains("file.txt"));
+    }
+
+    #[test]
+    fn dispatch_event_key_quit() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        let key = crossterm::event::KeyEvent::from(KeyCode::Char('q'));
+        dispatch_event(&mut app, AppEvent::Key(key));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn dispatch_event_resize() {
+        let tmp = TempDir::new().unwrap();
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        // Resize should not panic or change state
+        dispatch_event(&mut app, AppEvent::Resize);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn dispatch_event_file_changed() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "hello\n").unwrap();
+
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()));
+        assert_eq!(app.tracker.active_count(), 1);
+    }
+
+    #[test]
+    fn dispatch_event_file_deleted() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "hello\n").unwrap();
+
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+
+        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()));
+        assert_eq!(app.tracker.active_count(), 1);
+
+        dispatch_event(&mut app, AppEvent::FileDeleted(file_path));
+        assert!(app.tracker.panels[0].is_deleted);
+    }
+
+    #[test]
+    fn dispatch_event_tick_gc() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "hello\n").unwrap();
+
+        let args = make_args(tmp.path().to_path_buf());
+        let mut app = App::new(&args);
+        app.stale_timeout = std::time::Duration::ZERO;
+
+        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()));
+        dispatch_event(&mut app, AppEvent::FileDeleted(file_path));
+        // Tick should gc the stale deleted panel
+        dispatch_event(&mut app, AppEvent::Tick);
+        assert_eq!(app.tracker.active_count(), 0);
     }
 }

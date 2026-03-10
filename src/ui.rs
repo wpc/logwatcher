@@ -220,6 +220,22 @@ fn format_elapsed_since(t: std::time::SystemTime) -> String {
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use crate::file_tracker::FileTracker;
+
+    fn make_app(max_panels: usize) -> App {
+        App {
+            should_quit: false,
+            tracker: FileTracker::new(max_panels, std::path::PathBuf::from("/tmp")),
+            max_panels,
+            tail_lines: 50,
+            stale_timeout: Duration::from_secs(30),
+            scroll_offsets: Vec::new(),
+            selected_panel: 0,
+            show_help: false,
+        }
+    }
 
     #[test]
     fn format_elapsed_seconds() {
@@ -254,5 +270,243 @@ mod tests {
         assert_eq!(compute_grid(area, 2).len(), 2);
         assert_eq!(compute_grid(area, 4).len(), 4);
         assert_eq!(compute_grid(area, 6).len(), 6);
+    }
+
+    #[test]
+    fn render_empty_shows_no_files() {
+        let app = make_app(4);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("no files"));
+    }
+
+    #[test]
+    fn render_one_panel() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/test.log"),
+            vec!["hello world".into(), "second line".into()],
+            24,
+        );
+        app.ensure_scroll_offset(0);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("test.log"));
+        assert!(content.contains("hello world"));
+    }
+
+    #[test]
+    fn render_two_panels() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/a.log"),
+            vec!["aaa".into()],
+            4,
+        );
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/b.log"),
+            vec!["bbb".into()],
+            4,
+        );
+        app.ensure_scroll_offset(1);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("a.log"));
+        assert!(content.contains("b.log"));
+    }
+
+    #[test]
+    fn render_selected_panel() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/a.log"),
+            vec!["aaa".into()],
+            4,
+        );
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/b.log"),
+            vec!["bbb".into()],
+            4,
+        );
+        app.ensure_scroll_offset(1);
+        app.selected_panel = 1;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        // Should render without panic, panel 1 selected
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("b.log"));
+    }
+
+    #[test]
+    fn render_deleted_panel() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/gone.log"),
+            vec!["old data".into()],
+            9,
+        );
+        app.tracker.file_deleted(&std::path::PathBuf::from("/tmp/gone.log"));
+        app.ensure_scroll_offset(0);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("deleted"));
+    }
+
+    #[test]
+    fn render_panel_with_process_cmd() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/out.log"),
+            vec!["output".into()],
+            7,
+        );
+        app.tracker.panels[0].process_cmd = Some("tail -f".into());
+        app.ensure_scroll_offset(0);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("tail -f"));
+    }
+
+    #[test]
+    fn render_help_overlay() {
+        let mut app = make_app(4);
+        app.show_help = true;
+
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("Help"));
+        assert!(content.contains("Tab"));
+        assert!(content.contains("Quit"));
+    }
+
+    #[test]
+    fn render_with_scrollbar() {
+        let mut app = make_app(4);
+        // Create enough lines to exceed panel height
+        let lines: Vec<String> = (0..100).map(|i| format!("line {}", i)).collect();
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/big.log"),
+            lines,
+            5000,
+        );
+        app.ensure_scroll_offset(0);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Should render without panic including scrollbar
+        terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_scrolled_up_panel() {
+        let mut app = make_app(4);
+        let lines: Vec<String> = (0..100).map(|i| format!("line {}", i)).collect();
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/big.log"),
+            lines,
+            5000,
+        );
+        app.ensure_scroll_offset(0);
+        app.scroll_offsets[0] = 50; // scrolled up
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        // Should show lines around position 50, not the latest
+        assert!(!content.contains("line 99"));
+    }
+
+    #[test]
+    fn centered_rect_fits_inside() {
+        let outer = Rect::new(0, 0, 100, 50);
+        let inner = centered_rect(60, 70, outer);
+        assert!(inner.x >= outer.x);
+        assert!(inner.y >= outer.y);
+        assert!(inner.right() <= outer.right());
+        assert!(inner.bottom() <= outer.bottom());
+        assert!(inner.width > 0);
+        assert!(inner.height > 0);
+    }
+
+    #[test]
+    fn render_scroll_beyond_content() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/small.log"),
+            vec!["line1".into(), "line2".into()],
+            12,
+        );
+        app.ensure_scroll_offset(0);
+        // Scroll way beyond total lines
+        app.scroll_offsets[0] = 999;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Should not panic, just shows nothing
+        terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_scrollbar_at_top() {
+        let mut app = make_app(4);
+        let lines: Vec<String> = (0..100).map(|i| format!("line {}", i)).collect();
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/big.log"),
+            lines,
+            5000,
+        );
+        app.ensure_scroll_offset(0);
+        // Scroll to near the top — scroll + visible_height >= total_lines
+        app.scroll_offsets[0] = 90;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    /// Helper: flatten a ratatui Buffer into a single string for assertions
+    fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf.cell((x, y)).map_or(" ", |c| c.symbol()));
+            }
+        }
+        s
     }
 }
