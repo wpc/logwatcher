@@ -213,7 +213,7 @@ pub fn lookup_process(path: &Path) -> Option<String> {
     if result.is_empty() {
         return None;
     }
-    Some(truncate_cmd(&result, 60))
+    Some(result)
 }
 
 fn truncate_cmd(s: &str, max_len: usize) -> String {

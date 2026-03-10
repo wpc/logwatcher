@@ -93,10 +93,7 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
     };
 
     let deleted_marker = if tracked.is_deleted { " [deleted]" } else { "" };
-    let process_info = tracked.process_cmd.as_ref()
-        .map(|cmd| format!(" ({})", cmd))
-        .unwrap_or_default();
-    let title = format!(" [{}] {}{}{} ", panel_idx + 1, tracked.display_name, process_info, deleted_marker);
+    let title = format!(" [{}] {}{} ", panel_idx + 1, tracked.display_name, deleted_marker);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -114,7 +111,18 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let visible_height = inner.height as usize;
+    // Split inner area: log content on top, optional 2-line command bar at bottom
+    let (content_area, cmd_area) = if tracked.process_cmd.is_some() && inner.height > 2 {
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ]).split(inner);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (inner, None)
+    };
+
+    let visible_height = content_area.height as usize;
     if visible_height == 0 {
         return;
     }
@@ -137,7 +145,7 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
     let paragraph = Paragraph::new(visible_text)
         .wrap(Wrap { trim: false });
 
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, content_area);
 
     // Show scrollbar when content overflows
     if total_lines > visible_height {
@@ -151,9 +159,25 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .style(Style::default().fg(Color::DarkGray)),
-            inner,
+            content_area,
             &mut scrollbar_state,
         );
+    }
+
+    // Render command bar
+    if let Some(cmd_rect) = cmd_area {
+        if let Some(ref cmd) = tracked.process_cmd {
+            let max_chars = cmd_rect.width as usize * 2;
+            let display_cmd = if cmd.len() > max_chars {
+                format!("{}...", &cmd[..max_chars.saturating_sub(3)])
+            } else {
+                cmd.clone()
+            };
+            let cmd_paragraph = Paragraph::new(display_cmd)
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(cmd_paragraph, cmd_rect);
+        }
     }
 }
 
@@ -383,7 +407,7 @@ mod tests {
             vec!["output".into()],
             7,
         );
-        app.tracker.panels[0].process_cmd = Some("tail -f".into());
+        app.tracker.panels[0].process_cmd = Some("tail -f /tmp/out.log".into());
         app.ensure_scroll_offset(0);
 
         let backend = TestBackend::new(80, 24);
@@ -392,7 +416,31 @@ mod tests {
 
         let buf = terminal.backend().buffer().clone();
         let content = buffer_to_string(&buf);
-        assert!(content.contains("tail -f"));
+        // Command should appear in the bottom bar, not parenthesized in title
+        assert!(content.contains("tail -f /tmp/out.log"));
+        assert!(!content.contains("(tail -f"));
+    }
+
+    #[test]
+    fn render_panel_with_long_process_cmd() {
+        let mut app = make_app(4);
+        app.tracker.file_modified(
+            std::path::PathBuf::from("/tmp/out.log"),
+            vec!["output".into()],
+            7,
+        );
+        // Command longer than 2 lines of 78 chars (inner width) = 156 chars
+        let long_cmd = "a".repeat(200);
+        app.tracker.panels[0].process_cmd = Some(long_cmd);
+        app.ensure_scroll_offset(0);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("..."));
     }
 
     #[test]
