@@ -204,36 +204,42 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
+            if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_add(1);
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
+            if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_sub(1);
             }
         }
         KeyCode::PageUp => {
+            if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_add(20);
             }
         }
         KeyCode::PageDown => {
+            if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = offset.saturating_sub(20);
             }
         }
         KeyCode::End | KeyCode::Char('G') => {
+            if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 *offset = 0;
             }
         }
         KeyCode::Home | KeyCode::Char('g') => {
+            if active == 0 { return; }
             app.ensure_scroll_offset(app.selected_panel);
             if let Some(offset) = app.scroll_offsets.get_mut(app.selected_panel) {
                 let total = if app.selected_panel < active {

@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use crate::app::App;
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -138,6 +138,23 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, inner);
+
+    // Show scrollbar when content overflows
+    if total_lines > visible_height {
+        let position = if total_lines > scroll + visible_height {
+            total_lines - scroll - visible_height
+        } else {
+            0
+        };
+        let mut scrollbar_state = ScrollbarState::new(total_lines)
+            .position(position);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
