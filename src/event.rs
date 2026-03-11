@@ -11,6 +11,7 @@ pub enum AppEvent {
     Tick,
     FileChanged(PathBuf),
     FileDeleted(PathBuf),
+    ProcessSummaryReady { path: PathBuf, summary: String },
 }
 
 pub struct EventHandler {
@@ -77,7 +78,7 @@ impl EventHandler {
         tick_rate: std::time::Duration,
         watch_dir: PathBuf,
         glob_pattern: Option<String>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, mpsc::UnboundedSender<AppEvent>)> {
         let (tx, rx) = mpsc::unbounded_channel();
 
         // Crossterm events (keyboard + resize + tick)
@@ -114,11 +115,11 @@ impl EventHandler {
         // File system notify events
         let notify_task = spawn_notify_task(&watch_dir, glob_pattern, tx.clone())?;
 
-        Ok(Self {
+        Ok((Self {
             rx,
             _crossterm_task: crossterm_task,
             _notify_task: notify_task,
-        })
+        }, tx))
     }
 
     /// Create an EventHandler for testing (no crossterm/terminal needed).

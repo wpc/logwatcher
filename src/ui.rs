@@ -166,14 +166,30 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
 
     // Render command bar
     if let Some(cmd_rect) = cmd_area {
-        if let Some(ref cmd) = tracked.process_cmd {
-            let max_chars = cmd_rect.width as usize * 2;
-            let display_cmd = if cmd.len() > max_chars {
+        let width = cmd_rect.width as usize;
+        if let Some(ref summary) = tracked.process_summary {
+            // Line 1: LLM summary (cyan), Line 2: truncated raw cmd (dark gray)
+            let summary_line = Line::from(Span::styled(summary.clone(), Style::default().fg(Color::Cyan)));
+            let cmd_line = if let Some(ref cmd) = tracked.process_cmd {
+                let text = if cmd.len() > width.saturating_sub(3) {
+                    format!("{}...", &cmd[..width.saturating_sub(3)])
+                } else {
+                    cmd.clone()
+                };
+                Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+            } else {
+                Line::default()
+            };
+            let cmd_paragraph = Paragraph::new(vec![summary_line, cmd_line]);
+            frame.render_widget(cmd_paragraph, cmd_rect);
+        } else if let Some(ref cmd) = tracked.process_cmd {
+            let max_chars = width * 2;
+            let text = if cmd.len() > max_chars {
                 format!("{}...", &cmd[..max_chars.saturating_sub(3)])
             } else {
                 cmd.clone()
             };
-            let cmd_paragraph = Paragraph::new(display_cmd)
+            let cmd_paragraph = Paragraph::new(text)
                 .style(Style::default().fg(Color::DarkGray))
                 .wrap(Wrap { trim: false });
             frame.render_widget(cmd_paragraph, cmd_rect);

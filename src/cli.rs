@@ -27,4 +27,16 @@ pub struct Args {
     /// Glob pattern to filter files (e.g. "*.log", "*.txt")
     #[arg(short, long)]
     pub glob: Option<String>,
+
+    /// LLM API URL (OpenAI-compatible /v1/chat/completions) to summarize process commands
+    #[arg(long)]
+    pub llm_api_url: Option<String>,
+
+    /// Log file for LLM request/response debugging
+    #[arg(long)]
+    pub llm_log_file: Option<PathBuf>,
+
+    /// How far back (in minutes) to scan for files on startup
+    #[arg(long, default_value_t = 30)]
+    pub scan_back_minutes: u64,
 }

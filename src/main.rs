@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod event;
 mod file_tracker;
+mod llm;
 mod tail_reader;
 mod tui;
 mod ui;
@@ -41,17 +42,32 @@ async fn run(args: &Args, dir: &std::path::Path, terminal: &mut tui::Tui) -> Res
 
     initial_scan(&mut app, args)?;
 
-    let mut events = EventHandler::new(
+    let (mut events, event_tx) = EventHandler::new(
         std::time::Duration::from_millis(args.tick_rate_ms),
         dir.to_path_buf(),
         args.glob.clone(),
     )?;
 
+    // Spawn LLM summaries for initially scanned panels
+    if let Some(ref url) = args.llm_api_url {
+        for panel in &app.tracker.panels {
+            if let Some(ref cmd) = panel.process_cmd {
+                llm::spawn_summary(
+                    event_tx.clone(),
+                    panel.path.clone(),
+                    cmd.clone(),
+                    url.clone(),
+                    args.llm_log_file.clone(),
+                );
+            }
+        }
+    }
+
     terminal.draw(|f| ui::render(f, &app))?;
 
     loop {
         if let Some(event) = events.next().await {
-            dispatch_event(&mut app, event);
+            dispatch_event(&mut app, event, &event_tx, &args.llm_api_url, &args.llm_log_file);
             terminal.draw(|f| ui::render(f, &app))?;
         }
 
@@ -74,7 +90,7 @@ fn initial_scan(app: &mut App, args: &Args) -> Result<()> {
         mb.cmp(&ma) // most recent first
     });
 
-    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 60);
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(args.scan_back_minutes * 60);
 
     for path in entries.into_iter()
         .filter(|p| {
@@ -130,7 +146,13 @@ fn walkdir_recursive(
     Ok(())
 }
 
-fn handle_file_changed(app: &mut App, path: &std::path::Path) {
+fn handle_file_changed(
+    app: &mut App,
+    path: &std::path::Path,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    llm_api_url: &Option<String>,
+    llm_log_file: &Option<std::path::PathBuf>,
+) {
     if let Some(panel_idx) = app.tracker.panel_index(path) {
         let last_size = app.tracker.panels[panel_idx].last_size;
         match tail_reader::read_new_content(path, last_size, app.tail_lines) {
@@ -144,6 +166,17 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
                 // Lookup process if not yet known
                 if app.tracker.panels[panel_idx].process_cmd.is_none() {
                     app.tracker.panels[panel_idx].process_cmd = file_tracker::lookup_process(path);
+                    if let Some(ref url) = llm_api_url {
+                        if let Some(ref cmd) = app.tracker.panels[panel_idx].process_cmd {
+                            llm::spawn_summary(
+                                event_tx.clone(),
+                                path.to_path_buf(),
+                                cmd.clone(),
+                                url.clone(),
+                                llm_log_file.clone(),
+                            );
+                        }
+                    }
                 }
             }
             Err(_) => {
@@ -157,13 +190,30 @@ fn handle_file_changed(app: &mut App, path: &std::path::Path) {
                 let idx = app.tracker.file_modified(path.to_path_buf(), lines, size);
                 app.ensure_scroll_offset(idx);
                 app.tracker.panels[idx].process_cmd = file_tracker::lookup_process(path);
+                if let Some(ref url) = llm_api_url {
+                    if let Some(ref cmd) = app.tracker.panels[idx].process_cmd {
+                        llm::spawn_summary(
+                            event_tx.clone(),
+                            path.to_path_buf(),
+                            cmd.clone(),
+                            url.clone(),
+                            llm_log_file.clone(),
+                        );
+                    }
+                }
             }
             Err(_) => {}
         }
     }
 }
 
-fn dispatch_event(app: &mut App, event: AppEvent) {
+fn dispatch_event(
+    app: &mut App,
+    event: AppEvent,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    llm_api_url: &Option<String>,
+    llm_log_file: &Option<std::path::PathBuf>,
+) {
     match event {
         AppEvent::Key(key) => {
             handle_key(app, key);
@@ -172,7 +222,7 @@ fn dispatch_event(app: &mut App, event: AppEvent) {
             // ratatui handles resize automatically on next draw
         }
         AppEvent::FileChanged(path) => {
-            handle_file_changed(app, &path);
+            handle_file_changed(app, &path, event_tx, llm_api_url, llm_log_file);
         }
         AppEvent::FileDeleted(path) => {
             app.tracker.file_deleted(&path);
@@ -180,6 +230,11 @@ fn dispatch_event(app: &mut App, event: AppEvent) {
         AppEvent::Tick => {
             app.tracker.gc_stale(app.stale_timeout);
             app.clamp_selected_panel();
+        }
+        AppEvent::ProcessSummaryReady { path, summary } => {
+            if let Some(idx) = app.tracker.panel_index(&path) {
+                app.tracker.panels[idx].process_summary = Some(summary);
+            }
         }
     }
 }
@@ -273,7 +328,15 @@ mod tests {
             stale_seconds: 30,
             tick_rate_ms: 250,
             glob: None,
+            llm_api_url: None,
+            llm_log_file: None,
+            scan_back_minutes: 30,
         }
+    }
+
+    fn make_test_tx() -> tokio::sync::mpsc::UnboundedSender<AppEvent> {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tx
     }
 
     #[test]
@@ -475,7 +538,7 @@ mod tests {
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
 
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
 
         assert!(app.tracker.panel_index(&file_path).is_some());
         let idx = app.tracker.panel_index(&file_path).unwrap();
@@ -492,7 +555,7 @@ mod tests {
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
 
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
         let idx = app.tracker.panel_index(&file_path).unwrap();
         let size_after_first = app.tracker.panels[idx].last_size;
 
@@ -501,7 +564,7 @@ mod tests {
         f.write_all(b"line2\n").unwrap();
         f.flush().unwrap();
 
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
         let tracked = &app.tracker.panels[idx];
         assert_eq!(tracked.lines, vec!["line1", "line2"]);
         assert!(tracked.last_size > size_after_first);
@@ -612,12 +675,12 @@ mod tests {
 
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
         assert_eq!(app.tracker.active_count(), 1);
 
         // Delete the file, then trigger a change event
         std::fs::remove_file(&file_path).unwrap();
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
 
         // Should be marked deleted
         assert!(app.tracker.panels[0].is_deleted);
@@ -685,7 +748,7 @@ mod tests {
         for i in 0..3 {
             let p = tmp.path().join(format!("f{}.txt", i));
             std::fs::write(&p, format!("content {}", i)).unwrap();
-            handle_file_changed(&mut app, &p);
+            handle_file_changed(&mut app, &p, &make_test_tx(), &None, &None);
         }
 
         assert_eq!(app.tracker.active_count(), 3);
@@ -700,13 +763,13 @@ mod tests {
 
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
 
         let idx = app.tracker.panel_index(&file_path).unwrap();
         let size_before = app.tracker.panels[idx].last_size;
 
         // Trigger change without modifying the file — no new content
-        handle_file_changed(&mut app, &file_path);
+        handle_file_changed(&mut app, &file_path, &make_test_tx(), &None, &None);
         assert_eq!(app.tracker.panels[idx].last_size, size_before);
     }
 
@@ -809,7 +872,7 @@ mod tests {
         let mut app = App::new(&args);
 
         let key = crossterm::event::KeyEvent::from(KeyCode::Char('q'));
-        dispatch_event(&mut app, AppEvent::Key(key));
+        dispatch_event(&mut app, AppEvent::Key(key), &make_test_tx(), &None, &None);
         assert!(app.should_quit);
     }
 
@@ -820,7 +883,7 @@ mod tests {
         let mut app = App::new(&args);
 
         // Resize should not panic or change state
-        dispatch_event(&mut app, AppEvent::Resize);
+        dispatch_event(&mut app, AppEvent::Resize, &make_test_tx(), &None, &None);
         assert!(!app.should_quit);
     }
 
@@ -833,7 +896,7 @@ mod tests {
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
 
-        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()));
+        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()), &make_test_tx(), &None, &None);
         assert_eq!(app.tracker.active_count(), 1);
     }
 
@@ -846,10 +909,10 @@ mod tests {
         let args = make_args(tmp.path().to_path_buf());
         let mut app = App::new(&args);
 
-        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()));
+        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()), &make_test_tx(), &None, &None);
         assert_eq!(app.tracker.active_count(), 1);
 
-        dispatch_event(&mut app, AppEvent::FileDeleted(file_path));
+        dispatch_event(&mut app, AppEvent::FileDeleted(file_path), &make_test_tx(), &None, &None);
         assert!(app.tracker.panels[0].is_deleted);
     }
 
@@ -863,10 +926,10 @@ mod tests {
         let mut app = App::new(&args);
         app.stale_timeout = std::time::Duration::ZERO;
 
-        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()));
-        dispatch_event(&mut app, AppEvent::FileDeleted(file_path));
+        dispatch_event(&mut app, AppEvent::FileChanged(file_path.clone()), &make_test_tx(), &None, &None);
+        dispatch_event(&mut app, AppEvent::FileDeleted(file_path), &make_test_tx(), &None, &None);
         // Tick should gc the stale deleted panel
-        dispatch_event(&mut app, AppEvent::Tick);
+        dispatch_event(&mut app, AppEvent::Tick, &make_test_tx(), &None, &None);
         assert_eq!(app.tracker.active_count(), 0);
     }
 }

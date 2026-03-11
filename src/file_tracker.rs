@@ -11,6 +11,7 @@ pub struct TrackedFile {
     pub last_size: u64,
     pub is_deleted: bool,
     pub process_cmd: Option<String>,
+    pub process_summary: Option<String>,
     pub file_mtime: SystemTime,
 }
 
@@ -67,6 +68,7 @@ impl FileTracker {
             last_size: file_size,
             is_deleted: false,
             process_cmd: None,
+            process_summary: None,
             file_mtime: mtime,
         };
 
@@ -216,14 +218,6 @@ pub fn lookup_process(path: &Path) -> Option<String> {
     Some(result)
 }
 
-fn truncate_cmd(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,26 +340,6 @@ mod tests {
         let mut t = FileTracker::new(1, PathBuf::from("/home/user/logs"));
         t.file_modified(PathBuf::from("/home/user/logs/sub/output.txt"), vec![], 0);
         assert_eq!(t.panels[0].display_name, "sub/output.txt");
-    }
-
-    #[test]
-    fn truncate_cmd_short_unchanged() {
-        assert_eq!(super::truncate_cmd("tail -f x.txt", 60), "tail -f x.txt");
-    }
-
-    #[test]
-    fn truncate_cmd_exact_limit() {
-        let s = "a".repeat(60);
-        assert_eq!(super::truncate_cmd(&s, 60), s);
-    }
-
-    #[test]
-    fn truncate_cmd_over_limit() {
-        let s = "a".repeat(70);
-        let result = super::truncate_cmd(&s, 60);
-        assert_eq!(result.len(), 60);
-        assert!(result.ends_with("..."));
-        assert_eq!(&result[..57], &"a".repeat(57));
     }
 
     #[test]
