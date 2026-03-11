@@ -242,6 +242,9 @@ fn dispatch_event(
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
     let active = app.tracker.active_count();
     match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
         KeyCode::Char('q') | KeyCode::Esc => {
             app.should_quit = true;
         }
