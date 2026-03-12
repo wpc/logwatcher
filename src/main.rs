@@ -59,6 +59,14 @@ async fn run(args: &Args, dir: &std::path::Path, terminal: &mut tui::Tui) -> Res
                     url.clone(),
                     args.llm_log_file.clone(),
                 );
+            } else if !panel.lines.is_empty() {
+                llm::spawn_content_summary(
+                    event_tx.clone(),
+                    panel.path.clone(),
+                    panel.lines.join("\n"),
+                    url.clone(),
+                    args.llm_log_file.clone(),
+                );
             }
         }
     }
@@ -175,6 +183,16 @@ fn handle_file_changed(
                                 url.clone(),
                                 llm_log_file.clone(),
                             );
+                        } else if app.tracker.panels[panel_idx].process_summary.is_none()
+                            && !app.tracker.panels[panel_idx].lines.is_empty()
+                        {
+                            llm::spawn_content_summary(
+                                event_tx.clone(),
+                                path.to_path_buf(),
+                                app.tracker.panels[panel_idx].lines.join("\n"),
+                                url.clone(),
+                                llm_log_file.clone(),
+                            );
                         }
                     }
                 }
@@ -196,6 +214,14 @@ fn handle_file_changed(
                             event_tx.clone(),
                             path.to_path_buf(),
                             cmd.clone(),
+                            url.clone(),
+                            llm_log_file.clone(),
+                        );
+                    } else if !app.tracker.panels[idx].lines.is_empty() {
+                        llm::spawn_content_summary(
+                            event_tx.clone(),
+                            path.to_path_buf(),
+                            app.tracker.panels[idx].lines.join("\n"),
                             url.clone(),
                             llm_log_file.clone(),
                         );

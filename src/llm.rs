@@ -22,6 +22,23 @@ pub fn spawn_summary(
     });
 }
 
+/// Spawn a background task to summarize file content when no process command is detected.
+pub fn spawn_content_summary(
+    tx: mpsc::UnboundedSender<AppEvent>,
+    path: PathBuf,
+    content: String,
+    api_url: String,
+    log_file: Option<PathBuf>,
+) {
+    tokio::spawn(async move {
+        let summary = match call_content_llm(&content, &api_url, log_file.as_deref()).await {
+            Ok(s) => s,
+            Err(e) => format!("[LLM error: {}]", e),
+        };
+        let _ = tx.send(AppEvent::ProcessSummaryReady { path, summary });
+    });
+}
+
 /// Detect file paths in command args and read the first one found (up to 10KB).
 fn read_script_content(cmd: &str) -> Option<(String, String)> {
     for arg in cmd.split_whitespace() {
@@ -119,6 +136,76 @@ async fn call_llm(
 
     if let Some(lf) = log_file {
         append_log(lf, &format!("SUMMARY: {}", summary));
+    }
+
+    Ok(summary)
+}
+
+async fn call_content_llm(
+    content: &str,
+    api_url: &str,
+    log_file: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    let truncated = if content.len() > 10_000 {
+        format!("{}...(truncated)", &content[..10_000])
+    } else {
+        content.to_string()
+    };
+
+    let body = serde_json::json!({
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a log file analyzer. Given the content of a log file, reply with ONLY a single short summary (under 100 chars) describing what this file contains or what task produced it. No explanation, no quotes, no prefixes."
+            },
+            {
+                "role": "user",
+                "content": truncated
+            }
+        ],
+        "max_tokens": 16384
+    });
+
+    if let Some(lf) = log_file {
+        append_log(lf, &format!("CONTENT-REQUEST to {}\n{}", api_url, serde_json::to_string_pretty(&body).unwrap_or_default()));
+    }
+
+    let no_proxy = reqwest::Url::parse(api_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_default();
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .no_proxy()
+        .build()?;
+
+    std::env::set_var("NO_PROXY", &no_proxy);
+
+    let resp = client
+        .post(api_url)
+        .json(&body)
+        .send()
+        .await?;
+
+    let json: serde_json::Value = resp.json().await?;
+
+    if let Some(lf) = log_file {
+        append_log(lf, &format!("CONTENT-RESPONSE\n{}", serde_json::to_string_pretty(&json).unwrap_or_default()));
+    }
+
+    let choice = &json["choices"][0]["message"];
+
+    let summary = choice["content"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| choice["reasoning_content"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("unexpected LLM response format"))?
+        .trim()
+        .to_string();
+
+    if let Some(lf) = log_file {
+        append_log(lf, &format!("CONTENT-SUMMARY: {}", summary));
     }
 
     Ok(summary)

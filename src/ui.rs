@@ -112,7 +112,8 @@ fn render_panel(frame: &mut Frame, app: &App, panel_idx: usize, area: Rect) {
     frame.render_widget(block, area);
 
     // Split inner area: log content on top, optional 2-line command bar at bottom
-    let (content_area, cmd_area) = if tracked.process_cmd.is_some() && inner.height > 2 {
+    let has_bar = tracked.process_cmd.is_some() || tracked.process_summary.is_some();
+    let (content_area, cmd_area) = if has_bar && inner.height > 2 {
         let chunks = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(2),
